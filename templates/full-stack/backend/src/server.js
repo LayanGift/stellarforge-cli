@@ -1,5 +1,7 @@
 import { Buffer } from 'node:buffer';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { extname, resolve } from 'node:path';
 import { URL } from 'node:url';
 
 /**
@@ -7,6 +9,23 @@ import { URL } from 'node:url';
  * Requests exceeding this bound are rejected before unbounded memory buffering.
  */
 export const MAX_REQUEST_BODY_BYTES = 64 * 1024;
+
+export const BASELINE_SECURITY_HEADERS = Object.freeze({
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+  'referrer-policy': 'strict-origin-when-cross-origin',
+});
+
+export const STATIC_MIME_TYPES = Object.freeze({
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon',
+});
 
 export function getBackendConfig(env = globalThis.process.env) {
   return {
@@ -28,13 +47,21 @@ export function createHealthPayload(env = {}) {
   };
 }
 
-export function sendJson(response, statusCode, payload, extraHeaders = {}) {
+export function sendResponse(response, statusCode, headers = {}, body) {
   response.writeHead(statusCode, {
-    'content-type': 'application/json',
-    'x-content-type-options': 'nosniff',
-    ...extraHeaders,
+    ...BASELINE_SECURITY_HEADERS,
+    ...headers,
   });
-  response.end(JSON.stringify(payload));
+  response.end(body);
+}
+
+export function sendJson(response, statusCode, payload, extraHeaders = {}) {
+  sendResponse(
+    response,
+    statusCode,
+    { 'content-type': 'application/json', ...extraHeaders },
+    JSON.stringify(payload),
+  );
 }
 
 /**
@@ -62,7 +89,7 @@ export async function readJsonBody(
     }
   }
 
-  return new Promise((resolve) => {
+  return new Promise((resolveBody) => {
     let receivedBytes = 0;
     const chunks = [];
     let exceeded = false;
@@ -74,7 +101,7 @@ export async function readJsonBody(
         exceeded = true;
         request.destroy();
         sendJson(response, 413, { error: 'payload_too_large' });
-        resolve(null);
+        resolveBody(null);
         return;
       }
       chunks.push(chunk);
@@ -84,22 +111,22 @@ export async function readJsonBody(
       if (exceeded) return;
       const raw = Buffer.concat(chunks).toString('utf8');
       if (raw.trim().length === 0) {
-        resolve({});
+        resolveBody({});
         return;
       }
       try {
         const parsed = JSON.parse(raw);
-        resolve(parsed);
+        resolveBody(parsed);
       } catch {
         sendJson(response, 400, { error: 'malformed_json' });
-        resolve(null);
+        resolveBody(null);
       }
     });
 
     request.on('error', () => {
       if (!exceeded) {
         sendJson(response, 400, { error: 'bad_request' });
-        resolve(null);
+        resolveBody(null);
       }
     });
   });
@@ -112,6 +139,11 @@ export function createRequestHandler(
   const maxBodyBytes = Number.isFinite(options.maxBodyBytes)
     ? options.maxBodyBytes
     : MAX_REQUEST_BODY_BYTES;
+
+  const staticDir = resolve(
+    options.staticDir ??
+      resolve(import.meta.dirname, '..', '..', 'frontend', 'src'),
+  );
 
   const routes = {
     '/health': {
@@ -134,7 +166,10 @@ export function createRequestHandler(
 
   return async (request, response) => {
     const method = request.method ?? 'GET';
-    const parsedUrl = new URL(request.url ?? '/', 'http://127.0.0.1');
+    const parsedUrl = new URL(
+      request.url ?? '/',
+      `http://${request.headers.host ?? '127.0.0.1'}`,
+    );
     const pathname = parsedUrl.pathname;
 
     // Reject early if declared Content-Length exceeds max limit
@@ -149,31 +184,66 @@ export function createRequestHandler(
     }
 
     const route = routes[pathname];
-    if (!route) {
-      sendJson(response, 404, { error: 'not_found' });
+    if (route) {
+      if (!route.methods.includes(method)) {
+        sendJson(
+          response,
+          405,
+          { error: 'method_not_allowed' },
+          { allow: route.methods.join(', ') },
+        );
+        return;
+      }
+
+      if (method === 'HEAD') {
+        sendResponse(response, 200, { 'content-type': 'application/json' });
+        return;
+      }
+
+      await route.handler(request, response);
       return;
     }
 
-    if (!route.methods.includes(method)) {
-      sendJson(
-        response,
-        405,
-        { error: 'method_not_allowed' },
-        { allow: route.methods.join(', ') },
-      );
-      return;
+    // Static asset fallback for GET/HEAD
+    if (method === 'GET' || method === 'HEAD') {
+      const relativeAssetPath = pathname.startsWith('/')
+        ? pathname.slice(1)
+        : pathname;
+
+      if (relativeAssetPath.length > 0) {
+        const targetPath = resolve(staticDir, relativeAssetPath);
+        const isContained =
+          targetPath.startsWith(staticDir + '/') ||
+          targetPath.startsWith(staticDir + '\\') ||
+          targetPath === staticDir;
+
+        const ext = extname(targetPath).toLowerCase();
+        const contentType = STATIC_MIME_TYPES[ext];
+
+        if (isContained && contentType && existsSync(targetPath)) {
+          try {
+            const stat = statSync(targetPath);
+            if (stat.isFile()) {
+              const content = readFileSync(targetPath);
+              sendResponse(
+                response,
+                200,
+                {
+                  'content-type': contentType,
+                  'cache-control': 'no-cache',
+                },
+                method === 'HEAD' ? undefined : content,
+              );
+              return;
+            }
+          } catch {
+            // Fall through to 404
+          }
+        }
+      }
     }
 
-    if (method === 'HEAD') {
-      response.writeHead(200, {
-        'content-type': 'application/json',
-        'x-content-type-options': 'nosniff',
-      });
-      response.end();
-      return;
-    }
-
-    await route.handler(request, response);
+    sendJson(response, 404, { error: 'not_found' });
   };
 }
 

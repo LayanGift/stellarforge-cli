@@ -41,7 +41,7 @@ The starter has no build step and no runtime dependencies; `frontend/src/app.js`
 npm run start:backend
 ```
 
-The backend exposes `GET /health` on `127.0.0.1:3000` by default. Set `BACKEND_PORT` to override the port. The frontend has no server and no port variable at all.
+The backend exposes `GET /health` and static frontend assets (such as `GET /app.js`) on `127.0.0.1:3000` by default. Set `BACKEND_PORT` to override the port. The frontend has no server and no port variable at all.
 
 If the configured port is already in use, startup fails with a raw Node error such as:
 
@@ -71,7 +71,22 @@ The generated backend enforces deterministic, minimal HTTP boundaries without ex
 - **Unknown routes:** Requests to unmapped paths return a safe `404 Not Found` response (`{ "error": "not_found" }`) with no internal stack or environment reflection.
 - **Request size bounds:** Incoming request bodies are constrained by `MAX_REQUEST_BODY_BYTES` (64 KiB default). Payloads exceeding this bound (either via `Content-Length` or chunked transfer streaming) are rejected immediately with `413 Payload Too Large` before unbounded memory buffering.
 - **Content type & JSON validation:** JSON endpoints require `application/json` (returning `415 Unsupported Media Type` otherwise) and explicitly handle malformed JSON syntax with `400 Bad Request` (`{ "error": "malformed_json" }`).
-- **Security headers:** Responses include baseline `X-Content-Type-Options: nosniff`.
+- **Security headers:** Responses include baseline `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: strict-origin-when-cross-origin`.
+
+### Response security headers and production deployment
+
+The backend applies conservative baseline HTTP security headers across API and static asset responses:
+
+- `X-Content-Type-Options: nosniff` — prevents MIME type sniffing of responses and static files;
+- `X-Frame-Options: DENY` — defends against clickjacking across application boundaries;
+- `Referrer-Policy: strict-origin-when-cross-origin` — retains origin semantics for same-origin requests while protecting cross-origin navigation.
+
+To keep loopback development seamless, HTTP Strict Transport Security (`Strict-Transport-Security`) is not enabled for plain HTTP development, and no restrictive Content-Security-Policy (CSP) is imposed that would break starter UI integrations.
+
+Production deployments must implement deployment-specific security controls:
+- Terminate TLS with valid certificates and enable HSTS exclusively over HTTPS;
+- Configure reverse proxy headers, CORS policies, and upstream request filtering;
+- Author a dedicated Content-Security-Policy (CSP) matching your frontend distribution and asset domains.
 
 ## Environment
 

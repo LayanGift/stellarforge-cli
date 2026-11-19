@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { test } from 'node:test';
 import { setImmediate, setTimeout } from 'node:timers';
 import { getConfig } from '../src/config.js';
-import { createApiServer } from '../src/server.js';
+import { BASELINE_SECURITY_HEADERS, createApiServer } from '../src/server.js';
 import {
   createStellarBoundary,
   getStellarNetworkDescriptor,
@@ -200,6 +200,62 @@ test('health route response structure remains stable', async () => {
       ready.headers.get('content-type'),
       'application/json',
     );
+    assert.equal(
+      health.headers.get('x-content-type-options'),
+      'nosniff',
+    );
+    assert.equal(
+      health.headers.get('x-frame-options'),
+      'DENY',
+    );
+    assert.equal(
+      health.headers.get('referrer-policy'),
+      'no-referrer',
+    );
+    assert.equal(
+      health.headers.get('strict-transport-security'),
+      null,
+    );
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});
+
+test('HTTP server applies baseline security headers to success and error responses without HSTS', async () => {
+  const server = createApiServer({ STELLAR_NETWORK: 'TESTNET' });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  try {
+    const address = server.address();
+    assert.notEqual(address, null);
+    assert.equal(typeof address, 'object');
+
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    for (const path of ['/health', '/stellar/network', '/non-existent']) {
+      const response = await globalThis.fetch(`${baseUrl}${path}`);
+      for (const [header, expectedValue] of Object.entries(BASELINE_SECURITY_HEADERS)) {
+        assert.equal(
+          response.headers.get(header),
+          expectedValue,
+          `expected header ${header} to match ${expectedValue} on ${path}`,
+        );
+      }
+      assert.equal(
+        response.headers.get('strict-transport-security'),
+        null,
+        `HSTS must not be enabled without an HTTPS deployment context on ${path}`,
+      );
+      assert.equal(
+        response.headers.get('content-type'),
+        'application/json',
+      );
+      const json = await response.json();
+      assert.equal(typeof json, 'object');
+    }
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));

@@ -97,3 +97,18 @@ The tests use an ephemeral local port and do not call Stellar network services.
 `src/stellar-client.js` is the integration boundary. Add a Stellar SDK, RPC client, or Horizon client there only when the application has a concrete requirement. Keep transaction signing and secret management outside HTTP route handlers, validate all network responses, and never hard-code signing keys.
 
 The starter intentionally does not fabricate account, payment, contract, or transaction behavior. Consult the official Stellar documentation for the current SDK and RPC APIs before adding those capabilities.
+
+## Security headers and production review
+
+The service includes conservative baseline HTTP response security headers suitable for JSON APIs:
+
+- `X-Content-Type-Options: nosniff` — prevents MIME type sniffing of responses;
+- `X-Frame-Options: DENY` — defends against clickjacking and frame embedding;
+- `Referrer-Policy: no-referrer` — prevents leaking path or query data in referrer headers.
+
+The starter avoids opinionated Content-Security-Policy (CSP) headers that could conflict with client applications, and deliberately does not include HTTP Strict Transport Security (`Strict-Transport-Security`) headers without an established HTTPS deployment context.
+
+Production deployments must undergo a deployment-specific security review:
+- Terminate TLS with valid certificates and enable `Strict-Transport-Security` when served exclusively over HTTPS;
+- Review reverse proxy / API gateway forwarding, CORS policies, rate limiting, and request payload limits;
+- Align CSP headers with upstream application architecture where applicable.

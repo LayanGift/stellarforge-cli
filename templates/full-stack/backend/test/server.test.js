@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import http from 'node:http';
 import test from 'node:test';
 import {
+  BASELINE_SECURITY_HEADERS,
   createBackendServer,
   createHealthPayload,
   getBackendConfig,
@@ -73,6 +74,9 @@ test('health route returns deterministic 405 with Allow header for unsupported m
       assert.equal(res.status, 405);
       assert.equal(res.headers.get('allow'), 'GET, HEAD');
       assert.equal(res.headers.get('content-type'), 'application/json');
+      for (const [header, value] of Object.entries(BASELINE_SECURITY_HEADERS)) {
+        assert.equal(res.headers.get(header), value);
+      }
       const payload = await res.json();
       assert.deepEqual(payload, { error: 'method_not_allowed' });
     }
@@ -95,6 +99,9 @@ test('unknown routes return safe 404 response without information leakage', asyn
       const getRes = await globalThis.fetch(`${baseUrl}${path}`);
       assert.equal(getRes.status, 404);
       assert.equal(getRes.headers.get('content-type'), 'application/json');
+      for (const [header, value] of Object.entries(BASELINE_SECURITY_HEADERS)) {
+        assert.equal(getRes.headers.get(header), value);
+      }
       assert.deepEqual(await getRes.json(), { error: 'not_found' });
 
       const postRes = await globalThis.fetch(`${baseUrl}${path}`, {
@@ -125,6 +132,9 @@ test('POST /api/echo accepts valid JSON and enforces method boundary', async () 
       body: JSON.stringify({ message: 'hello stellar' }),
     });
     assert.equal(postRes.status, 200);
+    for (const [header, value] of Object.entries(BASELINE_SECURITY_HEADERS)) {
+      assert.equal(postRes.headers.get(header), value);
+    }
     const postPayload = await postRes.json();
     assert.deepEqual(postPayload, {
       status: 'ok',
@@ -300,4 +310,119 @@ test('rejects chunked streamed body exceeding maxBodyBytes during transfer', asy
 
 test('default MAX_REQUEST_BODY_BYTES bound is 64 KiB', () => {
   assert.equal(MAX_REQUEST_BODY_BYTES, 65536);
+});
+
+test('HTTP server exposes health and serves static frontend assets with baseline security headers', async () => {
+  const server = createBackendServer({ STELLAR_NETWORK: 'TESTNET' });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  try {
+    const address = server.address();
+    assert.notEqual(address, null);
+    assert.equal(typeof address, 'object');
+
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    // Test API route: /health
+    const health = await globalThis.fetch(`${baseUrl}/health`);
+    assert.equal(health.status, 200);
+    assert.equal(health.headers.get('content-type'), 'application/json');
+
+    for (const [header, value] of Object.entries(BASELINE_SECURITY_HEADERS)) {
+      assert.equal(
+        health.headers.get(header),
+        value,
+        `expected baseline header ${header}: ${value}`,
+      );
+    }
+    assert.equal(
+      health.headers.get('strict-transport-security'),
+      null,
+      'HSTS must not be enabled for plain HTTP loopback development',
+    );
+    assert.equal(
+      health.headers.get('content-security-policy'),
+      null,
+      'header policy must not create an invalid CSP for the starter UI',
+    );
+
+    const healthPayload = await health.json();
+    assert.deepEqual(healthPayload, {
+      status: 'ok',
+      app: '{{projectName}}',
+      network: 'TESTNET',
+    });
+
+    // Test static asset route: /app.js
+    const asset = await globalThis.fetch(`${baseUrl}/app.js`);
+    assert.equal(asset.status, 200);
+    assert.equal(
+      asset.headers.get('content-type'),
+      'application/javascript; charset=utf-8',
+    );
+    assert.equal(asset.headers.get('cache-control'), 'no-cache');
+
+    for (const [header, value] of Object.entries(BASELINE_SECURITY_HEADERS)) {
+      assert.equal(
+        asset.headers.get(header),
+        value,
+        `expected baseline header ${header}: ${value} on static asset`,
+      );
+    }
+    assert.equal(
+      asset.headers.get('strict-transport-security'),
+      null,
+      'HSTS must not be enabled on static asset responses in loopback',
+    );
+
+    const assetBody = await asset.text();
+    assert.match(assetBody, /createAppModel/);
+  } finally {
+    server.close();
+  }
+});
+
+test('HTTP server applies baseline security headers on error and traversal responses', async () => {
+  const server = createBackendServer({ STELLAR_NETWORK: 'TESTNET' });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  try {
+    const address = server.address();
+    assert.notEqual(address, null);
+    assert.equal(typeof address, 'object');
+
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    for (const target of ['/unknown', '/../package.json', '/app.js/outside']) {
+      const response = await globalThis.fetch(`${baseUrl}${target}`);
+      assert.equal(response.status, 404);
+      for (const [header, value] of Object.entries(BASELINE_SECURITY_HEADERS)) {
+        assert.equal(
+          response.headers.get(header),
+          value,
+          `expected baseline header ${header} on 404 response to ${target}`,
+        );
+      }
+      assert.equal(
+        response.headers.get('strict-transport-security'),
+        null,
+      );
+      const json = await response.json();
+      assert.deepEqual(json, { error: 'not_found' });
+    }
+
+    // Method not allowed / unsupported method
+    const postResponse = await globalThis.fetch(`${baseUrl}/health`, {
+      method: 'POST',
+    });
+    assert.equal(postResponse.status, 405);
+    for (const [header, value] of Object.entries(BASELINE_SECURITY_HEADERS)) {
+      assert.equal(postResponse.headers.get(header), value);
+    }
+    assert.equal(postResponse.headers.get('allow'), 'GET, HEAD');
+  } finally {
+    server.close();
+  }
 });

@@ -10,8 +10,17 @@ import {
 // local even while setup is slow, stuck, or failing.
 export const INITIALIZATION_TIMEOUT_MS = 1000;
 
+export const BASELINE_SECURITY_HEADERS = Object.freeze({
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+  'referrer-policy': 'no-referrer',
+});
+
 function sendJson(response, statusCode, payload) {
-  response.writeHead(statusCode, { 'content-type': 'application/json' });
+  response.writeHead(statusCode, {
+    'content-type': 'application/json',
+    ...BASELINE_SECURITY_HEADERS,
+  });
   response.end(JSON.stringify(payload));
 }
 
